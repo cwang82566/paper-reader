@@ -1,0 +1,231 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>数据库论文 · 双语阅读</title>
+<style>
+* { box-sizing: border-box }
+body { margin: 0; color: #171719; background: white; font: 15px system-ui; display: grid; grid-template-columns: 250px minmax(0,1fr); min-height: 100vh }
+aside { border-right: 1px solid #e6e5eb; background: #fafafd; padding: 24px 16px; position: sticky; top: 0; height: 100vh; overflow: auto }
+aside h2 { margin: 0 0 18px; font-size: 18px }
+input, button { font: inherit }
+input[type=search] { width: 100%; padding: 9px; border: 1px solid #d9d8e1; border-radius: 6px }
+nav { margin-top: 15px }
+nav button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 9px; cursor: pointer; border-radius: 6px }
+nav button:hover, nav button[aria-current=true] { background: #ece9ff; color: #4132a0 }
+small { display: block; color: #686776; margin-top: 3px }
+main { min-width: 0 }
+header { position: sticky; top: 0; background: white; padding: 12px 24px 8px; border-bottom: 1px solid #e6e5eb; z-index: 1 }
+.bar { display: flex; gap: 9px; flex-wrap: wrap; align-items: center }
+button, .button { border: 1px solid #d9d8e1; border-radius: 6px; background: white; color: #242333; padding: 7px 11px; cursor: pointer; text-decoration: none }
+button:disabled { opacity: .45; cursor: default }
+#translate { background: #5141ba; border-color: #5141ba; color: white }
+#status { margin: 6px 0 0; color: #626071; font-size: 13px }
+.reading { max-width: 960px; margin: 0 auto; padding: 48px clamp(16px,5vw,70px) }
+h1 { font: 700 clamp(24px,3vw,38px)/1.28 Georgia, serif; margin: 0 0 24px; overflow-wrap: anywhere }
+.pair { margin: 0 0 1.55em; overflow-wrap: anywhere; font-size: 17px; line-height: 1.72 }
+.en { font-family: Georgia, serif }
+.zh { margin-top: .4em; color: #333142; text-decoration: underline dotted #b8b4c4; text-underline-offset: .25em }
+.pair p,.pair h2,.pair h3,.pair h4 { margin: 0; white-space: pre-wrap }
+.pair .zh { margin-top: .4em }
+.pair h2,.pair h3,.pair h4 { line-height: 1.35 }
+.caption { font-size: .9em; color: #555361 }
+@media(max-width:720px) { body { grid-template-columns: 1fr } aside { position: static; height: auto; border-right: 0 } nav { display: flex; overflow: auto } nav button { min-width: 135px } }
+#list { max-height: 35vh; overflow:auto }
+#toc { margin-top: 0 }
+#toc button { font-size: 13px }
+.toc-title { padding-top: 18px; border-top: 1px solid #e6e5eb }
+.paper-page,.pair { scroll-margin-top: 105px }
+.page-tools { border-top: 1px solid #e6e5eb; display:flex; gap:12px; align-items:center; padding:8px 0; margin-bottom:20px; color:#686776; font-size:13px }
+.page-tools a { color:#5141ba }
+.page-tools img { max-width: 100%; display:block; margin: 12px 0 }
+details.pair { padding: 10px 0; font-size: 14px }
+#status:empty { display:none }
+</style>
+<aside><h2>论文列表</h2><input id="search" type="search" placeholder="搜索论文或会议"><nav id="list"></nav><p><label class="button">导入 PDF<input id="upload" type="file" accept=".pdf,application/pdf" hidden></label></p><h2 class="toc-title">本文目录</h2><nav id="toc" aria-label="本文目录"></nav></aside>
+<main><header><div class="bar"><a class="button" id="pdf" target="_blank" rel="noopener" hidden>打开 PDF</a><button id="translate" disabled>全文翻译</button><label><input id="auto" type="checkbox" checked> 自动翻译</label></div><p id="status" role="status"></p></header><div class="reading"><h1 id="title">数据库论文 · 双语阅读</h1><article id="content"></article></div></main>
+<script>
+const $=id=>document.getElementById(id);
+let papers=[], active=-1, doc=null, version=0, observer;
+let runVersion=0;
+const busy=new Map(), translated=new Map();
+async function request(path,data){
+  const opts=data===undefined?{}:{method:'POST',body:data instanceof File?data:JSON.stringify(data)};
+  const res=await fetch(path,opts), value=await res.json();
+  if(!res.ok) throw new Error(value.error);
+  return value;
+}
+function list(){
+  $('list').replaceChildren();
+  papers.forEach(([title,venue],i)=>{
+    if(!(title+' '+venue).toLowerCase().includes($('search').value.trim().toLowerCase()))return;
+    const button=document.createElement('button'), label=document.createElement('small');
+    button.textContent=title; label.textContent=venue; button.append(label);
+    button.setAttribute('aria-current',i===active); button.onclick=()=>load(i); $('list').append(button);
+  });
+}
+function pair(block, zh, id){
+  const container=document.createElement(block.kind==='authors'?'details':'section');
+  container.className='pair'; container.id=id;
+  const heading=block.kind==='heading';
+  if(block.kind==='authors'){
+    const summary=document.createElement('summary'); summary.textContent='作者与机构'; container.append(summary);
+  }
+  const tag=block.kind==='title'?'h1':heading?(/^\d+\.\d/.test(block.text)?'h3':'h2'):'p';
+  for(const [language,value] of [['en',block.text],['zh',zh]]){
+    if(!value)continue;
+    const node=document.createElement(tag);
+    node.lang=language==='zh'?'zh-CN':'en';
+    node.className=language+(block.kind==='caption'?' caption':'');
+    node.textContent=value.replace(/^#{1,3} +/,'');
+    container.append(node);
+  }
+  return container;
+}
+function translationsFor(blocks, cached){
+  if(!cached)return [];
+  if(cached.length===blocks.length&&cached.every(([en],i)=>en===blocks[i].text))
+    return cached.map(([,zh])=>zh);
+  const normalize=text=>text.replace(/(?<=[a-z])-\n(?=[a-z])/g,'').replace(/\s+/g,' ').trim();
+  const result=[];
+  for(const [en,zh] of cached){
+    const exact=blocks.findIndex(block=>normalize(en)===normalize(block.text));
+    if(exact>=0){result[exact]=zh;continue;}
+    const indices=blocks.flatMap((block,i)=>normalize(en).includes(normalize(block.text))?[i]:[]);
+    if(!indices.length)continue;
+    // Align legacy pages on explicit bilingual section boundaries when possible.
+    const lines=zh.split(/\n+/);
+    let offset=0, group=[];
+    function assign(end){
+      const usable=group.filter(i=>blocks[i].kind!=='authors');
+      const parts=lines.slice(offset,end);
+      const authors=group.find(i=>blocks[i].kind==='authors');
+      if(authors!==undefined&&usable.length===1){
+        const firstAuthor=blocks[authors].text.split('\n')[0];
+        const boundary=parts.findIndex(line=>line.trim()===firstAuthor);
+        if(boundary>0){
+          result[usable[0]]=parts.slice(0,boundary).filter(line=>!line.startsWith('arXiv:')).join(' ');
+          result[authors]=parts.slice(boundary).join('\n');
+        }
+      }else if(parts.length>=usable.length&&usable.length){
+        usable.forEach((i,j)=>result[i]=j===usable.length-1?parts.slice(j).join('\n'):parts[j]);
+      }else if(parts.length&&usable.length){
+        result[usable.at(-1)]=parts.join('\n');
+      }
+      group=[];
+    }
+    for(const i of indices){
+      const block=blocks[i];
+      const number=block.text.match(/^\d+(?:\.\d+)*\.? /)?.[0];
+      const marker=block.kind==='heading'?lines.findIndex((line,j)=>j>=offset&&(
+        (/^abstract$/i.test(block.text)&&/^#+ *摘要$|^摘要$/.test(line))||
+        (number&&line.replace(/^#+ +/,'').startsWith(number)))):-1;
+      if(marker>=0){assign(marker);result[i]=lines[marker];offset=marker+1;}
+      else group.push(i);
+    }
+    assign(lines.length);
+  }
+  return result;
+}
+function renderPage(n){
+  const section=$('paper-'+n), body=section.querySelector('.page-body');
+  const blocks=doc.layout[n], zh=translationsFor(blocks,translated.get(doc.key+':'+n));
+  body.replaceChildren(...blocks.map((block,i)=>pair(block,zh[i],'paper-'+n+'-'+i)));
+}
+function renderOutline(){
+  $('toc').replaceChildren();
+  doc.layout.forEach((blocks,n)=>{
+    const zh=translationsFor(blocks,translated.get(doc.key+':'+n));
+    blocks.forEach((block,i)=>{
+      if(block.kind!=='heading')return;
+      const button=document.createElement('button');
+      button.textContent=block.text;
+      if(/^\d+\.\d/.test(block.text))button.style.paddingLeft='22px';
+      if(zh[i]){const label=document.createElement('small');label.textContent=zh[i].replace(/^#+ +/,'');button.append(label);}
+      button.onclick=()=>$('paper-'+n+'-'+i).scrollIntoView();
+      $('toc').append(button);
+    });
+  });
+}
+async function translatePage(n){
+  const current=version, key=doc.key+':'+n;
+  if(translated.has(key)||!doc.layout[n].length)return;
+  if(busy.has(key))return busy.get(key);
+  const task=request('/translate',{key:doc.key,page:n}).then(pairs=>{
+    translated.set(key,pairs);
+    if(current===version){renderPage(n);renderOutline();}
+  }).finally(()=>busy.delete(key));
+  busy.set(key,task);
+  return task;
+}
+async function translateAll(){
+  const current=version, run=++runVersion;
+  $('translate').disabled=true;
+  try{
+    for(let n=0;n<doc.pages.length;n++){
+      if(current!==version||run!==runVersion)return;
+      if(translated.has(doc.key+':'+n))continue;
+      $('status').textContent='正在翻译第 '+(n+1)+' 页…';
+      await translatePage(n);
+    }
+    if(current===version)$('status').textContent='全文翻译已保存';
+  }catch(error){if(current===version)$('status').textContent=error.message;}
+  finally{if(current===version)$('translate').disabled=false;}
+}
+function mount(){
+  const sections=doc.layout.map((blocks,n)=>{
+    const section=document.createElement('section');
+    section.id='paper-'+n;section.className='paper-page';
+    const tools=document.createElement('details');tools.className='page-tools';
+    const summary=document.createElement('summary');summary.textContent='第 '+(n+1)+' 页 · 原页截图';
+    tools.append(summary);
+    tools.addEventListener('toggle',()=>{
+      if(!tools.open||tools.querySelector('img'))return;
+      const img=document.createElement('img');img.alt='原版 PDF 第 '+(n+1)+' 页';
+      img.src='/snapshot/'+doc.key+'/'+n;tools.append(img);
+    });
+    const body=document.createElement('div');body.className='page-body';
+    section.append(body,tools);
+    return section;
+  });
+  $('content').replaceChildren(...sections);
+  sections.forEach((_,n)=>renderPage(n));
+  renderOutline();
+  if(doc.layout[0]?.[0]?.kind==='title')$('title').hidden=true;
+  const current=version;
+  observer=new IntersectionObserver(entries=>{
+    if(current!==version)return;
+    if(!$('auto').checked)return;
+    entries.filter(e=>e.isIntersecting).forEach(e=>{
+      const n=Number(e.target.id.slice(6));
+      translatePage(n).catch(error=>{if(current===version)$('status').textContent=error.message;});
+    });
+  });
+  sections.forEach(section=>observer.observe(section));
+}
+async function load(i,file){
+  const current=++version; active=i;doc=null;observer?.disconnect();
+  list();$('content').replaceChildren();$('toc').replaceChildren();$('title').hidden=false;
+  $('translate').disabled=true;
+  $('title').textContent=file?file.name:papers[i][0];
+  $('pdf').hidden=Boolean(file);if(!file)$('pdf').href=papers[i][2];
+  $('status').textContent='正在加载论文与已保存译文…';
+  try{
+    const value=await (file?request('/upload',file):request('/load',{index:i}));
+    const [layout,saved]=await Promise.all([
+      request('/layout/'+value.key),
+      Promise.all(value.pages.map((_,n)=>request('/saved/'+value.key+'/'+n)))
+    ]);
+    if(current!==version)return;
+    doc={...value,layout};
+    saved.forEach((pairs,n)=>{if(pairs)translated.set(value.key+':'+n,pairs);});
+    $('pdf').href='/pdf/'+doc.key;$('pdf').hidden=false;$('translate').disabled=false;
+    $('status').textContent='';mount();window.scrollTo(0,0);
+  }catch(error){if(current===version)$('status').textContent=error.message;}
+}
+$('search').oninput=list;
+$('upload').onchange=e=>{const file=e.target.files[0];if(file)load(-1,file);e.target.value='';};
+$('translate').onclick=translateAll;
+$('auto').onchange=()=>{
+  if(!$('auto').checked||!doc)return;
+  for(const section of $('content').children){observer.unobserve(section);observer.observe(section);}
+};
+request('/papers').then(value=>{papers=value;list();$('status').textContent='从左侧选择一篇论文开始阅读。';})
+.catch(error=>{$('status').textContent=error.message;});
+</script></html>

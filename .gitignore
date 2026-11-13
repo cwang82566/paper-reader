@@ -1,0 +1,11 @@
+.cache/
+__pycache__/
+.DS_Store
+.env
+.env.*
+.codex/
+auth.json
+*.pem
+*.key
+*.p12
+*.pdf
